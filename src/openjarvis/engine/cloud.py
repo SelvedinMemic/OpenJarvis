@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import time
 from collections.abc import AsyncIterator, Sequence
@@ -18,6 +19,8 @@ from openjarvis.engine._base import (
     messages_to_dicts,
 )
 from openjarvis.engine._stubs import StreamChunk
+
+logger = logging.getLogger(__name__)
 
 # Pricing per million tokens (input, output)
 PRICING: Dict[str, tuple[float, float]] = {
@@ -613,10 +616,11 @@ class CloudEngine(InferenceEngine):
         #   - web_search_tool_result     (server-tool result body)
         #   - tool_result                (caller-side tool result echo)
         #   - thinking                   (Opus reasoning trace)
-        # We keep everything: a full ``content_blocks`` list for the trace
-        # collector, plus convenience fields ``tool_calls`` (tool_use +
-        # server_tool_use) and ``tool_results`` (web_search_tool_result +
-        # tool_result) for downstream consumers.
+        # ``content_blocks`` keeps the full serialized list for trace
+        # observability. ``tool_calls`` is the narrow caller-executable
+        # surface — only ``tool_use`` blocks (server_tool_use lives in
+        # content_blocks since Anthropic already ran it server-side).
+        # ``tool_results`` aggregates both result kinds.
         content_parts: list[str] = []
         tool_calls: list[Dict[str, Any]] = []
         tool_results: list[Dict[str, Any]] = []
@@ -625,16 +629,22 @@ class CloudEngine(InferenceEngine):
             btype = getattr(block, "type", None) or type(block).__name__
             serialized = _serialize_anthropic_block(block)
             content_blocks.append(serialized)
-            if btype in ("tool_use", "server_tool_use"):
+            if btype == "tool_use":
+                block_id = getattr(block, "id", None)
+                if not block_id:
+                    logger.warning(
+                        "Anthropic tool_use block without an id; skipping. "
+                        "Round-trip into the next assistant turn would fail "
+                        "Anthropic's tool_use_id matching."
+                    )
+                    continue
                 tool_calls.append(
                     {
-                        "id": getattr(block, "id", None)
-                        or f"{btype}_{len(tool_calls)}",
+                        "id": block_id,
                         "name": getattr(block, "name", ""),
                         "arguments": json.dumps(getattr(block, "input", None))
                         if isinstance(getattr(block, "input", None), dict)
                         else str(getattr(block, "input", "")),
-                        "server_side": btype == "server_tool_use",
                     }
                 )
             elif btype in ("web_search_tool_result", "tool_result"):
@@ -1335,6 +1345,31 @@ class CloudEngine(InferenceEngine):
                     stop_reason = event.delta.stop_reason
                     finish = "tool_calls" if stop_reason == "tool_use" else "stop"
                     yield StreamChunk(finish_reason=finish)
+
+            # End-of-stream parity with ``_generate_anthropic``: emit
+            # ``content_blocks`` (every block kind, including server_tool_use
+            # and thinking) and ``tool_results`` (web_search_tool_result +
+            # tool_result) so streaming traces see what non-streaming traces
+            # see.
+            try:
+                final_msg = stream.get_final_message()
+            except Exception as exc:  # noqa: BLE001 — SDK shape varies
+                logger.debug("Anthropic stream.get_final_message() failed: %s", exc)
+                final_msg = None
+            if final_msg is not None and getattr(final_msg, "content", None):
+                content_blocks: list[Dict[str, Any]] = []
+                tool_results: list[Dict[str, Any]] = []
+                for block in final_msg.content:
+                    btype = getattr(block, "type", None) or type(block).__name__
+                    serialized = _serialize_anthropic_block(block)
+                    content_blocks.append(serialized)
+                    if btype in ("web_search_tool_result", "tool_result"):
+                        tool_results.append(serialized)
+                if content_blocks or tool_results:
+                    yield StreamChunk(
+                        content_blocks=content_blocks or None,
+                        tool_results=tool_results or None,
+                    )
 
     async def stream_full(
         self,

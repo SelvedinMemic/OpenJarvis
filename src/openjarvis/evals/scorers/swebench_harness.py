@@ -34,6 +34,7 @@ called for the first time).
 from __future__ import annotations
 
 import json
+import logging
 import os
 import re
 import subprocess
@@ -44,6 +45,8 @@ from typing import Any, Dict, Optional, Tuple
 
 from openjarvis.evals.core.scorer import Scorer
 from openjarvis.evals.core.types import EvalRecord
+
+logger = logging.getLogger(__name__)
 
 
 # ---------- Patch tracking ----------
@@ -67,7 +70,18 @@ def _patch_modal_cgroup_v2() -> None:
         return
     orig = getattr(_m, "set_cpu_quota", None)
     if orig is None:
-        # API changed — nothing to patch, but mark so we don't retry.
+        # Upstream API changed: ``set_cpu_quota`` no longer exists. The
+        # cgroup-v1 write that used to live inside it is either gone (good)
+        # or now lives somewhere we can't patch (bad — every Modal-v2
+        # sandbox will still die). Surface loudly so failures aren't
+        # silently scored as 0 via the ``no_report`` fallback in
+        # :func:`_run_harness`.
+        logger.warning(
+            "swebench.harness.modal_eval.run_evaluation_modal.set_cpu_quota "
+            "is missing — cgroup-v2 patch could not be applied. If your "
+            "Modal sandboxes are scoring 0 with `reason: no_report`, "
+            "verify upstream swebench's Modal cgroup handling."
+        )
         _m._hybrid_cgroup_patched = True  # type: ignore[attr-defined]
         return
 
@@ -157,6 +171,18 @@ def _run_harness(instance_id: str, patch: str, timeout_s: int) -> Dict[str, Any]
     backend = os.environ.get("SWEBENCH_BACKEND", "modal").lower()
     cache = _harness_cache_dir()
     run_id = f"oj-{instance_id}"
+
+    # Defend against stale reports: ``run_id`` is deterministic per
+    # instance, the cache dir is shared across runs, and ``_find_report``
+    # globs by filename. If a prior subprocess crashed mid-run (or was
+    # killed by timeout) and left a stale JSON, we'd silently read that
+    # old verdict as the current result. Delete it up front.
+    stale = cache / f"openjarvis-harness.{run_id}.json"
+    if stale.exists():
+        try:
+            stale.unlink()
+        except OSError as exc:
+            logger.warning("Could not remove stale report %s: %s", stale, exc)
 
     with tempfile.TemporaryDirectory() as tmp:
         tmp_path = Path(tmp)

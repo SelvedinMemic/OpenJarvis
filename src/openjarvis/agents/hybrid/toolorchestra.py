@@ -369,72 +369,109 @@ class ToolOrchestraAgent(LocalCloudAgent):
                 "base_commit": task_meta["base_commit"],
             })
 
-        history: List[Dict[str, Any]] = []
-        tokens_local = 0
-        tokens_cloud = 0
-        cost = 0.0
-        final_answer: Optional[str] = None
-        forced_final = False
-        parse_failures = 0
+        # try/finally guards ``shared_workdir`` against exceptions raised
+        # anywhere in the turn loop, the worker calls, the fallback, or
+        # the diff-extraction step. Without this, at n=500 SWE-bench an
+        # exception leaves hundreds of MB of cloned repos in tempdir.
+        try:
+            history: List[Dict[str, Any]] = []
+            tokens_local = 0
+            tokens_cloud = 0
+            cost = 0.0
+            final_answer: Optional[str] = None
+            forced_final = False
+            parse_failures = 0
 
-        for turn in range(1, max_turns + 1):
-            sys_prompt = ORCHESTRATOR_SYS
-            if turn == max_turns and final_answer is None:
-                sys_prompt = ORCHESTRATOR_SYS + "\n\n" + FORCE_FINAL_PROMPT
-                forced_final = True
+            for turn in range(1, max_turns + 1):
+                sys_prompt = ORCHESTRATOR_SYS
+                if turn == max_turns and final_answer is None:
+                    sys_prompt = ORCHESTRATOR_SYS + "\n\n" + FORCE_FINAL_PROMPT
+                    forced_final = True
 
-            user = _build_user_prompt(question, workers, history)
-            text, o_in, o_out = self._call_cloud(
-                user=user,
-                system=sys_prompt,
-                max_tokens=orch_max_tokens,
-                temperature=0.0,
-            )
-            tokens_cloud += o_in + o_out
-            cost += self.cost_usd(self._cloud_model, o_in, o_out)
+                user = _build_user_prompt(question, workers, history)
+                text, o_in, o_out = self._call_cloud(
+                    user=user,
+                    system=sys_prompt,
+                    max_tokens=orch_max_tokens,
+                    temperature=0.0,
+                )
+                tokens_cloud += o_in + o_out
+                cost += self.cost_usd(self._cloud_model, o_in, o_out)
 
-            action = _parse_action(text)
-            history.append({
-                "role": "orchestrator", "turn": turn, "raw": text, "action": action,
-            })
-            self.record_trace_event({
-                "kind": "toolorchestra_action",
-                "turn": turn,
-                "action": action,
-                "raw": text,
-            })
+                action = _parse_action(text)
+                history.append({
+                    "role": "orchestrator", "turn": turn, "raw": text, "action": action,
+                })
+                self.record_trace_event({
+                    "kind": "toolorchestra_action",
+                    "turn": turn,
+                    "action": action,
+                    "raw": text,
+                })
 
-            if action is None:
-                parse_failures += 1
-                if parse_failures >= 2 or forced_final:
-                    final_answer = _extract_final_answer_text(text)
-                    break
-                continue
-
-            kind = action.get("action")
-            if kind == "final_answer":
-                final_answer = str(action.get("answer", "")).strip()
-                break
-            if kind == "call_worker":
-                wid = action.get("worker_id")
-                w_input = action.get("input", "")
-                if not isinstance(wid, int) or not (0 <= wid < len(workers)):
+                if action is None:
                     parse_failures += 1
                     if parse_failures >= 2 or forced_final:
                         final_answer = _extract_final_answer_text(text)
                         break
                     continue
-                worker = workers[wid]
-                if swe_mode and shared_workdir is not None:
-                    w_text, w_in, w_out, is_local, extra_cost, n_searches = (
-                        _swe_call_worker(
-                            worker, str(w_input), cfg, task_meta,
-                            shared_workdir, turn,
+
+                kind = action.get("action")
+                if kind == "final_answer":
+                    final_answer = str(action.get("answer", "")).strip()
+                    break
+                if kind == "call_worker":
+                    wid = action.get("worker_id")
+                    w_input = action.get("input", "")
+                    if not isinstance(wid, int) or not (0 <= wid < len(workers)):
+                        parse_failures += 1
+                        if parse_failures >= 2 or forced_final:
+                            final_answer = _extract_final_answer_text(text)
+                            break
+                        continue
+                    worker = workers[wid]
+                    if swe_mode and shared_workdir is not None:
+                        w_text, w_in, w_out, is_local, extra_cost, n_searches = (
+                            _swe_call_worker(
+                                worker, str(w_input), cfg, task_meta,
+                                shared_workdir, turn,
+                            )
                         )
+                    else:
+                        w_text, w_in, w_out, is_local, extra_cost, n_searches = (
+                            _call_worker(worker, str(w_input), cfg)
+                        )
+                    if is_local:
+                        tokens_local += w_in + w_out
+                    else:
+                        tokens_cloud += w_in + w_out
+                        cost += self.cost_usd(worker["model"], w_in, w_out) + extra_cost
+                    history.append({
+                        "role": "worker",
+                        "turn": turn,
+                        "worker_id": wid,
+                        "worker_name": worker["name"],
+                        "worker_model": worker["model"],
+                        "output": w_text,
+                        "tokens_in": w_in,
+                        "tokens_out": w_out,
+                        "n_web_searches": n_searches,
+                    })
+                    continue
+                # Unknown action kind — treat as parse failure.
+                parse_failures += 1
+
+            if final_answer is None:
+                # Hard fallback: call the strongest worker (last) directly.
+                worker = workers[-1]
+                if swe_mode and shared_workdir is not None:
+                    ans, w_in, w_out, is_local, extra_cost, _ = _swe_call_worker(
+                        worker, question, cfg, task_meta,
+                        shared_workdir, max_turns + 1,
                     )
                 else:
-                    w_text, w_in, w_out, is_local, extra_cost, n_searches = (
-                        _call_worker(worker, str(w_input), cfg)
+                    ans, w_in, w_out, is_local, extra_cost, _ = _call_worker(
+                        worker, question, cfg
                     )
                 if is_local:
                     tokens_local += w_in + w_out
@@ -443,77 +480,47 @@ class ToolOrchestraAgent(LocalCloudAgent):
                     cost += self.cost_usd(worker["model"], w_in, w_out) + extra_cost
                 history.append({
                     "role": "worker",
-                    "turn": turn,
-                    "worker_id": wid,
+                    "turn": max_turns + 1,
+                    "worker_id": worker["id"],
                     "worker_name": worker["name"],
                     "worker_model": worker["model"],
-                    "output": w_text,
+                    "output": ans,
                     "tokens_in": w_in,
                     "tokens_out": w_out,
-                    "n_web_searches": n_searches,
+                    "fallback": True,
                 })
-                continue
-            # Unknown action kind — treat as parse failure.
-            parse_failures += 1
+                final_answer = ans
 
-        if final_answer is None:
-            # Hard fallback: call the strongest worker (last) directly.
-            worker = workers[-1]
+            # In SWE mode, the authoritative output is the working-tree diff —
+            # frame it (the runner extracts it via the scorer's ```diff fence).
             if swe_mode and shared_workdir is not None:
-                ans, w_in, w_out, is_local, extra_cost, _ = _swe_call_worker(
-                    worker, question, cfg, task_meta,
-                    shared_workdir, max_turns + 1,
-                )
-            else:
-                ans, w_in, w_out, is_local, extra_cost, _ = _call_worker(
-                    worker, question, cfg
-                )
-            if is_local:
-                tokens_local += w_in + w_out
-            else:
-                tokens_cloud += w_in + w_out
-                cost += self.cost_usd(worker["model"], w_in, w_out) + extra_cost
-            history.append({
-                "role": "worker",
-                "turn": max_turns + 1,
-                "worker_id": worker["id"],
-                "worker_name": worker["name"],
-                "worker_model": worker["model"],
-                "output": ans,
-                "tokens_in": w_in,
-                "tokens_out": w_out,
-                "fallback": True,
-            })
-            final_answer = ans
+                patch = _extract_diff(shared_workdir)
+                if patch.strip():
+                    final_answer = (
+                        f"{final_answer}\n\n```diff\n{patch}```"
+                        if final_answer else f"```diff\n{patch}```"
+                    )
 
-        # In SWE mode, the authoritative output is the working-tree diff —
-        # frame it (the runner extracts it via the scorer's ```diff fence).
-        if swe_mode and shared_workdir is not None:
-            patch = _extract_diff(shared_workdir)
-            if patch.strip():
-                final_answer = (
-                    f"{final_answer}\n\n```diff\n{patch}```"
-                    if final_answer else f"```diff\n{patch}```"
-                )
-            shutil.rmtree(shared_workdir, ignore_errors=True)
-
-        meta = {
-            "tokens_local": tokens_local,
-            "tokens_cloud": tokens_cloud,
-            "cost_usd": cost,
-            "turns": len([h for h in history if h["role"] == "orchestrator"]),
-            "traces": {
-                "history": history,
-                "forced_final": forced_final,
-                "parse_failures": parse_failures,
-                "workers": workers,
-                "note": (
-                    "inference-only port; the RL-trained Nemotron-Orchestrator-8B "
-                    "is NOT in the loop. Results are preliminary."
-                ),
-            },
-        }
-        return final_answer, meta
+            meta = {
+                "tokens_local": tokens_local,
+                "tokens_cloud": tokens_cloud,
+                "cost_usd": cost,
+                "turns": len([h for h in history if h["role"] == "orchestrator"]),
+                "traces": {
+                    "history": history,
+                    "forced_final": forced_final,
+                    "parse_failures": parse_failures,
+                    "workers": workers,
+                    "note": (
+                        "inference-only port; the RL-trained Nemotron-Orchestrator-8B "
+                        "is NOT in the loop. Results are preliminary."
+                    ),
+                },
+            }
+            return final_answer, meta
+        finally:
+            if shared_workdir is not None:
+                shutil.rmtree(shared_workdir, ignore_errors=True)
 
 
 __all__ = ["ToolOrchestraAgent"]

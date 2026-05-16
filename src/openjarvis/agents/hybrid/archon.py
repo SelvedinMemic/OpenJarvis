@@ -37,6 +37,7 @@ from __future__ import annotations
 
 import os
 import sys
+import threading
 import types
 from typing import Any, Dict, Optional, Tuple
 
@@ -110,15 +111,31 @@ def _patch_anthropic_for_opus() -> None:
 
 # ---------- Per-run token tally + custom generators ----------
 
-_TOKEN_TALLY = {
-    "cloud_prompt": 0, "cloud_completion": 0,
-    "local_prompt": 0, "local_completion": 0,
-}
+# Token tallies live in thread-local storage because the runner reuses one
+# ArchonAgent across a ``ThreadPoolExecutor`` (``concurrency > 1``). A plain
+# module-global dict would let concurrent ``_run_paradigm`` calls reset and
+# read each other's counters, producing wrong ``cost_usd`` and
+# ``tokens_local`` / ``tokens_cloud`` in per-task ``meta``.
+_TALLY_LOCAL = threading.local()
+
+
+def _tally() -> Dict[str, int]:
+    """Return the calling thread's token tally, creating it on first touch."""
+    counts = getattr(_TALLY_LOCAL, "counts", None)
+    if counts is None:
+        counts = {
+            "cloud_prompt": 0, "cloud_completion": 0,
+            "local_prompt": 0, "local_completion": 0,
+        }
+        _TALLY_LOCAL.counts = counts
+    return counts
 
 
 def _reset_tally() -> None:
-    for k in _TOKEN_TALLY:
-        _TOKEN_TALLY[k] = 0
+    _TALLY_LOCAL.counts = {
+        "cloud_prompt": 0, "cloud_completion": 0,
+        "local_prompt": 0, "local_completion": 0,
+    }
 
 
 def _make_local_generator(local_endpoint: str, local_model: str):
@@ -148,8 +165,8 @@ def _make_local_generator(local_endpoint: str, local_model: str):
             return f"[local-vllm error: {e!r}]"
         u = resp.usage
         if u:
-            _TOKEN_TALLY["local_prompt"] += getattr(u, "prompt_tokens", 0) or 0
-            _TOKEN_TALLY["local_completion"] += getattr(u, "completion_tokens", 0) or 0
+            _tally()["local_prompt"] += getattr(u, "prompt_tokens", 0) or 0
+            _tally()["local_completion"] += getattr(u, "completion_tokens", 0) or 0
         text = (resp.choices[0].message.content or "").strip()
         _record_event({
             "kind": "archon_local_gen",
@@ -191,8 +208,8 @@ def _wrap_archon_cloud_generators() -> None:
         resp = client.chat.completions.create(**kwargs)
         u = resp.usage
         if u:
-            _TOKEN_TALLY["cloud_prompt"] += getattr(u, "prompt_tokens", 0) or 0
-            _TOKEN_TALLY["cloud_completion"] += getattr(u, "completion_tokens", 0) or 0
+            _tally()["cloud_prompt"] += getattr(u, "prompt_tokens", 0) or 0
+            _tally()["cloud_completion"] += getattr(u, "completion_tokens", 0) or 0
         text = (resp.choices[0].message.content or "").strip()
         _record_event({
             "kind": "archon_cloud_openai",
@@ -226,8 +243,8 @@ def _wrap_archon_cloud_generators() -> None:
         text = "".join(b.text for b in resp.content if hasattr(b, "text"))
         u = resp.usage
         if u:
-            _TOKEN_TALLY["cloud_prompt"] += getattr(u, "input_tokens", 0) or 0
-            _TOKEN_TALLY["cloud_completion"] += getattr(u, "output_tokens", 0) or 0
+            _tally()["cloud_prompt"] += getattr(u, "input_tokens", 0) or 0
+            _tally()["cloud_completion"] += getattr(u, "output_tokens", 0) or 0
         _record_event({
             "kind": "archon_cloud_anthropic",
             "model": model,
@@ -420,15 +437,15 @@ class ArchonAgent(LocalCloudAgent):
             answer = answer[-1] if answer else ""
         answer = str(answer)
 
-        cp = _TOKEN_TALLY["cloud_prompt"]
-        cc = _TOKEN_TALLY["cloud_completion"]
+        cp = _tally()["cloud_prompt"]
+        cc = _tally()["cloud_completion"]
         cost = _cost_cloud(ranker_model, cp, cc)
         if fuser_model != ranker_model:
             # Conservative: charge both at the more expensive of the two.
             cost = max(cost, _cost_cloud(fuser_model, cp, cc))
 
         meta = {
-            "tokens_local": _TOKEN_TALLY["local_prompt"] + _TOKEN_TALLY["local_completion"],
+            "tokens_local": _tally()["local_prompt"] + _tally()["local_completion"],
             "tokens_cloud": cp + cc,
             "cost_usd": cost,
             "turns": (K + 2) if arch == "ensemble_rank_fuse" else 1,
@@ -438,7 +455,7 @@ class ArchonAgent(LocalCloudAgent):
                 "ranker_model": ranker_model,
                 "fuser_model":  fuser_model,
                 "local_model":  self._local_model,
-                "tokens_breakdown": dict(_TOKEN_TALLY),
+                "tokens_breakdown": dict(_tally()),
             },
         }
         return answer, meta
