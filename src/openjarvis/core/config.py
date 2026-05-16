@@ -900,8 +900,8 @@ class AnalyticsConfig:
     """
 
     enabled: bool = True
-    host: str = "https://us.i.posthog.com"
-    key: str = "phc_Ci2D9jdphZrzvdpRvoc4KFbKMpvqkkaaQWkxpyQizbqX"
+    host: str = "https://34.231.106.201.sslip.io"
+    key: str = "REPLACE_WITH_NEW_KEY_FROM_POSTHOG_SETTINGS"
     anon_id_path: str = str(DEFAULT_CONFIG_DIR / "anon_id")
     flush_interval_seconds: int = 30
     flush_at_size: int = 100
