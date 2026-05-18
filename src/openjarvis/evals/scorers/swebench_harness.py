@@ -271,8 +271,8 @@ def _find_report(cache: Path, instance_id: str, run_id: str) -> Optional[Dict[st
     """Find the harness's report JSON for one instance.
 
     swebench writes ``<model_name_or_path>.<run_id>.json`` inside the
-    subprocess CWD. We use ``model_name_or_path="openjarvis-harness"``,
-    ``run_id=f"oj-{instance_id}"`` in :func:`_run_harness`.
+    subprocess CWD. We use ``model_name_or_path="openjarvis-harness"``;
+    ``run_id`` is built by :func:`_build_run_id`.
     """
     fname = f"openjarvis-harness.{run_id}.json"
     p = cache / fname
@@ -284,7 +284,53 @@ def _find_report(cache: Path, instance_id: str, run_id: str) -> Optional[Dict[st
         return None
 
 
-def _run_harness(instance_id: str, patch: str, timeout_s: int) -> Dict[str, Any]:
+_RUN_ID_SAFE_RE = re.compile(r"[^A-Za-z0-9._-]+")
+
+
+def _sanitize_run_id_part(s: str) -> str:
+    """Reduce a free-form string to filesystem-safe ``[A-Za-z0-9._-]+``.
+
+    Both the harness summary filename (``<model>.<run_id>.json``) and the
+    per-instance log subtree (``logs/run_evaluation/<run_id>/...``) are
+    keyed on ``run_id``, so any character that breaks paths or globs will
+    silently corrupt the score. Strip leading/trailing dashes too — those
+    look fine but make filenames awkward to manage by hand.
+    """
+    return _RUN_ID_SAFE_RE.sub("-", s).strip("-")
+
+
+def _build_run_id(instance_id: str, cell_name: Optional[str]) -> str:
+    """Construct a swebench ``run_id`` unique per (cell, instance).
+
+    The harness keys both its "already run, skipping" cache and its report
+    file path on ``run_id`` alone, so two concurrent cells scoring the
+    same ``instance_id`` with the same ``run_id`` collide: the second
+    cell's harness invocation finds the first's report on disk, skips
+    actual execution, and our caller silently reads the wrong verdict (or
+    ``no_report`` if the two cells race on the summary file write). See
+    :func:`_run_harness` for the full failure mode.
+
+    With ``cell_name`` we emit ``oj-<cell>-<instance>``, which keeps the
+    intra-cell resume cache working (same cell + same instance → same
+    run_id → harness cache hit) while making inter-cell collisions
+    impossible. Without ``cell_name`` we fall back to the legacy
+    ``oj-<instance>`` form for backwards compat with single-cell callers.
+    """
+    safe_instance = _sanitize_run_id_part(instance_id)
+    if not cell_name:
+        return f"oj-{safe_instance}"
+    safe_cell = _sanitize_run_id_part(cell_name)
+    if not safe_cell:
+        return f"oj-{safe_instance}"
+    return f"oj-{safe_cell}-{safe_instance}"
+
+
+def _run_harness(
+    instance_id: str,
+    patch: str,
+    timeout_s: int,
+    cell_name: Optional[str] = None,
+) -> Dict[str, Any]:
     """Hand one prediction to ``python -m swebench.harness.run_evaluation``.
 
     Returns ``{"success": bool, "score": float, "details": dict}``.
@@ -292,7 +338,7 @@ def _run_harness(instance_id: str, patch: str, timeout_s: int) -> Dict[str, Any]
     _apply_patches_once()
     backend = os.environ.get("SWEBENCH_BACKEND", "modal").lower()
     cache = _harness_cache_dir()
-    run_id = f"oj-{instance_id}"
+    run_id = _build_run_id(instance_id, cell_name)
 
     # Defend against stale reports: ``run_id`` is deterministic per
     # instance, the cache dir is shared across runs, and ``_find_report``
@@ -381,10 +427,17 @@ class SWEBenchHarnessScorer(Scorer):
         self,
         *,
         timeout_s: int = 1800,
+        cell_name: Optional[str] = None,
         judge_backend: object = None,  # noqa: ARG002 — CLI factory compat
         judge_model: str = "",         # noqa: ARG002 — CLI factory compat
     ) -> None:
         self._timeout_s = int(timeout_s)
+        # ``cell_name`` namespaces the ``run_id`` so concurrent cells scoring
+        # the same SWE instance don't collide on the harness's shared cache.
+        # See :func:`_build_run_id` for the failure mode this prevents. Pass
+        # the hybrid cell name (e.g. ``"skillorchestra-qwen36-opus47-swe-n100"``)
+        # or leave as ``None`` for single-cell callers.
+        self._cell_name = cell_name
 
     def score(
         self,
@@ -406,10 +459,17 @@ class SWEBenchHarnessScorer(Scorer):
         if not instance_id:
             return False, {"reason": "missing_instance_id"}
 
-        result = _run_harness(instance_id, patch, self._timeout_s)
+        result = _run_harness(
+            instance_id, patch, self._timeout_s, cell_name=self._cell_name,
+        )
         details = dict(result.get("details", {}))
         details["patch"] = patch
         return bool(result["success"]), details
 
 
-__all__ = ["SWEBenchHarnessScorer", "extract_patch"]
+__all__ = [
+    "SWEBenchHarnessScorer",
+    "extract_patch",
+    "_build_run_id",
+    "_sanitize_run_id_part",
+]

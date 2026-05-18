@@ -256,8 +256,19 @@ def _score_gaia(task: Dict[str, Any], answer: str) -> Dict[str, Any]:
     }
 
 
-def _score_swebench(task: Dict[str, Any], answer: str) -> Dict[str, Any]:
-    """Modal-backed SWE-bench Verified harness scorer."""
+def _score_swebench(
+    task: Dict[str, Any],
+    answer: str,
+    cell_name: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Modal-backed SWE-bench Verified harness scorer.
+
+    ``cell_name`` is passed through to :class:`SWEBenchHarnessScorer` so the
+    underlying ``run_id`` is unique per (cell, instance). Without it,
+    concurrent hybrid cells scoring the same task collide on the shared
+    swebench harness cache and the second cell silently scores 0 with
+    ``reason: no_report`` (or reads the first cell's verdict).
+    """
     from openjarvis.evals.core.types import EvalRecord
     from openjarvis.evals.scorers.swebench_harness import (
         SWEBenchHarnessScorer,
@@ -275,7 +286,10 @@ def _score_swebench(task: Dict[str, Any], answer: str) -> Dict[str, Any]:
         category="agentic",
         metadata={"instance_id": task["task_id"]},
     )
-    scorer = SWEBenchHarnessScorer(timeout_s=int(os.environ.get("SWEBENCH_TIMEOUT_S", "1800")))
+    scorer = SWEBenchHarnessScorer(
+        timeout_s=int(os.environ.get("SWEBENCH_TIMEOUT_S", "1800")),
+        cell_name=cell_name,
+    )
     is_correct, details = scorer.score(record, answer)
     return {
         "success": bool(is_correct),
@@ -284,11 +298,16 @@ def _score_swebench(task: Dict[str, Any], answer: str) -> Dict[str, Any]:
     }
 
 
-def score(bench: str, task: Dict[str, Any], answer: str) -> Dict[str, Any]:
+def score(
+    bench: str,
+    task: Dict[str, Any],
+    answer: str,
+    cell_name: Optional[str] = None,
+) -> Dict[str, Any]:
     if bench == "gaia":
         return _score_gaia(task, answer)
     if bench in ("swebench-verified", "swebench_verified", "swebench"):
-        return _score_swebench(task, answer)
+        return _score_swebench(task, answer, cell_name=cell_name)
     raise ValueError(f"unknown bench: {bench!r}")
 
 
@@ -573,7 +592,9 @@ def _run_cell_locked(
         scored: Optional[Dict[str, Any]] = None
         if do_score and row.get("error") is None:
             try:
-                scored = score(cell["bench"], task, row["answer"])
+                scored = score(
+                    cell["bench"], task, row["answer"], cell_name=cell_name,
+                )
             except Exception as e:
                 scored = {
                     "success": False, "score": 0.0,
