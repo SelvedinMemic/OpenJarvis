@@ -105,6 +105,13 @@ steady_state_threshold = 0.05            # Coefficient of variation threshold fo
 enabled = true                            # Record traces for analysis
 db_path = "~/.openjarvis/traces.db"
 
+[speech]
+backend = "faster-whisper"               # "auto", "faster-whisper", "openai", "deepgram"
+model = "base"                           # tiny, base, small, medium, large-v3
+language = "de"                          # Empty = auto-detect
+device = "auto"                          # "auto", "cpu", "cuda"
+compute_type = "int8"                    # CPU-friendly default (also works on many GPU setups)
+
 [server]
 # Bind to loopback by default so the API is not exposed to the local network.
 # To serve other devices on your LAN, set host = "0.0.0.0" AND set an API key

@@ -7,6 +7,19 @@ import { useAppStore } from '../../lib/store';
 import { Sparkles, PanelRightOpen, PanelRightClose, Database, MessageSquare, X } from 'lucide-react';
 import { listConnectors } from '../../lib/connectors-api';
 
+type BrowserSpeechRecognition = {
+  lang: string;
+  continuous: boolean;
+  interimResults: boolean;
+  onresult: ((event: any) => void) | null;
+  onerror: ((event: any) => void) | null;
+  onend: (() => void) | null;
+  start: () => void;
+  stop: () => void;
+};
+
+type BrowserSpeechRecognitionCtor = new () => BrowserSpeechRecognition;
+
 function getGreeting(): string {
   const hour = new Date().getHours();
   if (hour < 12) return 'Good morning';
@@ -14,14 +27,23 @@ function getGreeting(): string {
   return 'Good evening';
 }
 
+function getWakeGreeting(): string {
+  const hour = new Date().getHours();
+  if (hour < 12) return 'Guten Morgen. Ich bin bereit.';
+  if (hour < 18) return 'Guten Tag. Ich hoere zu.';
+  return 'Guten Abend. Ich bin bereit.';
+}
+
 export function ChatArea() {
   const messages = useAppStore((s) => s.messages);
   const streamState = useAppStore((s) => s.streamState);
+  const speechEnabled = useAppStore((s) => s.settings.speechEnabled);
   const systemPanelOpen = useAppStore((s) => s.systemPanelOpen);
   const toggleSystemPanel = useAppStore((s) => s.toggleSystemPanel);
   const navigate = useNavigate();
   const listRef = useRef<HTMLDivElement>(null);
   const shouldAutoScroll = useRef(true);
+  const wakeCooldownRef = useRef(0);
 
   // Check if any data sources are connected
   const [hasConnectedSources, setHasConnectedSources] = useState<boolean | null>(null);
@@ -38,6 +60,70 @@ export function ChatArea() {
       listRef.current.scrollTop = listRef.current.scrollHeight;
     }
   }, [messages, streamState.content]);
+
+  useEffect(() => {
+    if (!speechEnabled) return;
+    if (typeof window === 'undefined') return;
+
+    const ctor = (
+      (window as any).SpeechRecognition ||
+      (window as any).webkitSpeechRecognition
+    ) as BrowserSpeechRecognitionCtor | undefined;
+
+    if (!ctor) return;
+
+    let stopped = false;
+    const recognition = new ctor();
+    recognition.lang = (navigator.language || 'de-DE');
+    recognition.continuous = true;
+    recognition.interimResults = true;
+
+    recognition.onresult = (event: any) => {
+      const last = event.results?.[event.results.length - 1];
+      const transcript = String(last?.[0]?.transcript || '').toLowerCase();
+      if (!transcript.includes('jarvis')) return;
+
+      const now = Date.now();
+      if (now - wakeCooldownRef.current < 8000) return;
+      wakeCooldownRef.current = now;
+
+      if ('speechSynthesis' in window) {
+        const utterance = new SpeechSynthesisUtterance(getWakeGreeting());
+        utterance.lang = 'de-DE';
+        utterance.rate = 1;
+        window.speechSynthesis.cancel();
+        window.speechSynthesis.speak(utterance);
+      }
+    };
+
+    recognition.onerror = () => {
+      // Ignore transient recognition errors (permissions, network, no-speech).
+    };
+
+    recognition.onend = () => {
+      if (stopped) return;
+      try {
+        recognition.start();
+      } catch {
+        // Starting twice can throw while engine is already active.
+      }
+    };
+
+    try {
+      recognition.start();
+    } catch {
+      // Microphone permission might not be granted yet.
+    }
+
+    return () => {
+      stopped = true;
+      try {
+        recognition.stop();
+      } catch {
+        // Stop can throw if recognition did not start.
+      }
+    };
+  }, [speechEnabled]);
 
   const handleScroll = () => {
     if (!listRef.current) return;
