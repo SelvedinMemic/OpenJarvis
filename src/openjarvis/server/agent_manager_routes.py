@@ -585,6 +585,8 @@ def _instantiate_managed_tool(
         return tool_cls(channel=channel)
     if name == "llm":
         return tool_cls(engine=engine, model=model)
+    if name == "email_summary":
+        return tool_cls(engine=engine, model=model)
     return tool_cls()
 
 

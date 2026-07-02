@@ -13,6 +13,7 @@ Supports two modes:
 from __future__ import annotations
 
 import concurrent.futures
+import json
 import re
 from typing import Any, List, Optional
 
@@ -213,6 +214,13 @@ class OrchestratorAgent(ToolUsingAgent):
     ) -> AgentResult:
         self._emit_turn_start(input)
 
+        # Execute obvious local launch commands directly instead of relying
+        # on model-side tool selection.
+        direct = self._maybe_execute_direct_action(input)
+        if direct is not None:
+            self._emit_turn_end(turns=direct.turns, content_length=len(direct.content))
+            return direct
+
         # Build initial messages
         messages = self._build_messages(input, context)
 
@@ -370,6 +378,110 @@ class OrchestratorAgent(ToolUsingAgent):
                 "completion_tokens": total_completion_tokens,
                 "total_tokens": total_prompt_tokens + total_completion_tokens,
             },
+        )
+
+    def _infer_launch_intent(self, text: str) -> Optional[dict[str, Any]]:
+        raw = text.strip()
+        if not raw:
+            return None
+
+        lowered = raw.lower().strip()
+        lowered = re.sub(r"^jarvis\s*[:,\-]?\s*", "", lowered)
+
+        launch_verbs = (
+            "oeffne",
+            "öffne",
+            "starte",
+            "start",
+            "open",
+            "launch",
+        )
+        if not lowered.startswith(launch_verbs):
+            return None
+
+        if "neuen tab" in lowered or "new tab" in lowered or "tab" in lowered:
+            return {"target": "chrome", "arguments": ["--new-tab"]}
+
+        url_match = re.search(r"(https?://\S+|www\.\S+)", lowered)
+        if url_match:
+            url = url_match.group(1)
+            if url.startswith("www."):
+                url = f"https://{url}"
+            return {"target": url, "arguments": []}
+
+        browser_aliases = {
+            "chrome": ["chrome", "google chrome", "chrome browser"],
+            "edge": ["edge", "microsoft edge", "edge browser"],
+            "firefox": ["firefox", "mozilla firefox", "fire fox"],
+        }
+        for target, aliases in browser_aliases.items():
+            if any(alias in lowered for alias in aliases):
+                return {"target": target, "arguments": []}
+
+        tail = lowered
+        for verb in launch_verbs:
+            if tail.startswith(verb):
+                tail = tail[len(verb) :].strip()
+                break
+        tail = re.sub(
+            r"^(bitte\s+)?(den|die|das|dem|einen|eine|ein|meinen|meine|mein)\s+",
+            "",
+            tail,
+        )
+        tail = tail.strip(" .,!?:;")
+        if not tail:
+            return None
+
+        return {"target": tail, "arguments": []}
+
+    def _tool_exists(self, tool_name: str) -> bool:
+        return any(getattr(t.spec, "name", "") == tool_name for t in self._tools)
+
+    def _maybe_execute_direct_action(self, input_text: str) -> Optional[AgentResult]:
+        intent = self._infer_launch_intent(input_text)
+        if intent is None:
+            return None
+
+        tool_results: list[ToolResult] = []
+
+        if self._tool_exists("app_launch"):
+            app_call = ToolCall(
+                id="direct_app_launch",
+                name="app_launch",
+                arguments=json.dumps(
+                    {
+                        "target": intent["target"],
+                        "arguments": intent.get("arguments", []),
+                    },
+                    ensure_ascii=False,
+                ),
+            )
+            app_result = self._executor.execute(app_call)
+            tool_results.append(app_result)
+            if app_result.success:
+                return AgentResult(content=app_result.content, tool_results=tool_results, turns=1)
+
+        if self._tool_exists("shell_exec"):
+            args = " ".join(intent.get("arguments", []))
+            target = str(intent["target"])
+            if re.match(r"^https?://", target):
+                command = f'start "" "{target}"'
+            else:
+                command = f'start "" {target} {args}'.strip()
+
+            shell_call = ToolCall(
+                id="direct_shell_exec",
+                name="shell_exec",
+                arguments=json.dumps({"command": command}, ensure_ascii=False),
+            )
+            shell_result = self._executor.execute(shell_call)
+            tool_results.append(shell_result)
+            return AgentResult(content=shell_result.content, tool_results=tool_results, turns=1)
+
+        return AgentResult(
+            content="Kein geeignetes Local-Launch-Tool verfuegbar.",
+            tool_results=tool_results,
+            turns=1,
         )
 
 

@@ -7,6 +7,11 @@ import { fetchSavings, getBase } from '../../lib/api';
 import { listConnectors, getSyncStatus } from '../../lib/connectors-api';
 import { MicButton } from './MicButton';
 import { useSpeech } from '../../hooks/useSpeech';
+import {
+  STARTUP_FOLLOWUP,
+  normalizeStartupCommand,
+  startupAssistantEnabled,
+} from '../../lib/startup';
 import type {
   ChatMessage,
   MessageTelemetry,
@@ -79,6 +84,7 @@ export function InputArea() {
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const abortRef = useRef<AbortController | null>(null);
   const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const sendMessageRef = useRef<((rawInput?: string) => Promise<void>) | null>(null);
 
   const activeId = useAppStore((s) => s.activeId);
   const selectedModel = useAppStore((s) => s.selectedModel);
@@ -153,8 +159,8 @@ export function InputArea() {
     resetStream();
   }, [resetStream]);
 
-  const sendMessage = useCallback(async () => {
-    const content = input.trim();
+  const sendMessage = useCallback(async (rawInput?: string) => {
+    const content = normalizeStartupCommand((rawInput ?? input).trim());
     if (!content || streamState.isStreaming) return;
     if (!selectedModel) {
       toast.error('Pick a model first (⌘K)');
@@ -368,10 +374,17 @@ export function InputArea() {
         } else if (eventName === 'tool_call_start') {
           try {
             const data = JSON.parse(sseEvent.data);
+            const rawArgs = data.arguments;
+            const argsText =
+              typeof rawArgs === 'string'
+                ? rawArgs
+                : rawArgs != null
+                  ? JSON.stringify(rawArgs)
+                  : '';
             const tc: ToolCallInfo = {
               id: generateId(),
               tool: data.tool,
-              arguments: data.arguments || '',
+              arguments: argsText,
               status: 'running',
             };
             toolCalls.push(tc);
@@ -382,7 +395,7 @@ export function InputArea() {
             updateLastAssistant(convId, accumulatedContent, [...toolCalls]);
             useAppStore.getState().addLogEntry({
               timestamp: Date.now(), level: 'info', category: 'tool',
-              message: `Calling ${data.tool}(${data.arguments || ''})`,
+              message: `Calling ${data.tool}(${argsText})`,
             });
           } catch {}
         } else if (eventName === 'tool_call_end') {
@@ -496,6 +509,16 @@ export function InputArea() {
         timestamp: Date.now(), level: 'info', category: 'chat',
         message: `Response: ${accumulatedContent.length} chars`,
       });
+
+      if (startupAssistantEnabled()) {
+        addMessage(convId, {
+          id: generateId(),
+          role: 'assistant',
+          content: STARTUP_FOLLOWUP,
+          timestamp: Date.now(),
+        });
+      }
+
       abortRef.current = null;
 
       // Research path updates session counters optimistically from the
@@ -522,6 +545,25 @@ export function InputArea() {
     temperature,
     maxTokens,
   ]);
+
+  useEffect(() => {
+    sendMessageRef.current = sendMessage;
+  }, [sendMessage]);
+
+  useEffect(() => {
+    const handler = (event: Event) => {
+      const customEvent = event as CustomEvent<string>;
+      const command = String(customEvent.detail || '').trim();
+      if (!command) return;
+      setInput(command);
+      void sendMessageRef.current?.(command);
+    };
+
+    window.addEventListener('openjarvis-voice-command', handler as EventListener);
+    return () => {
+      window.removeEventListener('openjarvis-voice-command', handler as EventListener);
+    };
+  }, []);
 
   const handleKeyDown = (e: React.KeyboardEvent) => {
     if (e.key === 'Enter' && !e.shiftKey) {
@@ -601,7 +643,7 @@ export function InputArea() {
               reason={micReason}
             />
             <button
-              onClick={sendMessage}
+              onClick={() => { void sendMessage(); }}
               disabled={!input.trim() || modelLoading || !selectedModel}
               title={selectedModel ? 'Send message' : 'Pick a model first (⌘K)'}
               className="p-2 rounded-xl transition-colors shrink-0 cursor-pointer disabled:opacity-30 disabled:cursor-default"

@@ -197,6 +197,17 @@ async def chat_completions(request_body: ChatCompletionRequest, request: Request
             return await _handle_stream_tools(
                 engine, model, request_body, complexity_info, app_config=config
             )
+        # Plain streaming chat from the desktop UI should still execute local
+        # tools (e.g. app_launch for "open Chrome") when an agent is wired in.
+        # Going directly to engine.stream() bypasses orchestrator tool logic and
+        # yields text-only pseudo tool calls. Use the agent stream bridge when
+        # possible so execution and tool events happen on this path too.
+        if agent is not None:
+            bus = getattr(request.app.state, "bus", None)
+            if bus is not None:
+                from openjarvis.server.stream_bridge import create_agent_stream
+
+                return await create_agent_stream(agent, bus, model, request_body)
         return await _handle_stream(
             engine,
             model,

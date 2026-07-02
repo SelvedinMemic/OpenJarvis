@@ -2,7 +2,7 @@
 
 A small, self-contained planner-executor loop:
 
-* the planner is a local Ollama chat model (default ``gemma4:31b``),
+* the planner is a local Ollama chat model (default ``qwen3.5:4b``),
 * the only tool it can call is :meth:`HybridSearch.search`,
 * it gets up to ``max_iterations`` tool calls,
 * tool results are trimmed before re-entering the context window, and
@@ -30,7 +30,7 @@ from openjarvis.engine._base import InferenceEngine
 logger = logging.getLogger(__name__)
 
 
-DEFAULT_PLANNER_MODEL = "gemma4:31b"
+DEFAULT_PLANNER_MODEL = "qwen3.5:4b"
 
 
 CLARIFY_TOOL_SPEC: Dict[str, Any] = {
@@ -54,7 +54,7 @@ CLARIFY_TOOL_SPEC: Dict[str, Any] = {
                         "The clarifying question to ask the user. Be specific "
                         "about what you need to know to make progress."
                     ),
-                },
+                }
             },
             "required": ["question"],
         },
@@ -456,7 +456,7 @@ class ResearchAgent:
     search:
         The HybridSearch instance the planner can call.
     model:
-        Planner model tag (default ``gemma4:31b``).
+        Planner model tag (default ``qwen3.5:4b``).
     max_iterations:
         Hard ceiling on tool calls before the loop is forced into synthesis.
     temperature, max_tokens, num_ctx:

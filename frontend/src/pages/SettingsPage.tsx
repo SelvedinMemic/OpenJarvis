@@ -19,8 +19,14 @@ import {
   RefreshCw,
 } from 'lucide-react';
 import { useAppStore, type ThemeMode } from '../lib/store';
-import { checkHealth, fetchSpeechHealth, getMemoryStats, getInferenceSource, setInferenceSource, type InferenceSource } from '../lib/api';
+import { checkHealth, fetchSpeechHealth, getMemoryStats, getInferenceSource, isTauri, setInferenceSource, type InferenceSource } from '../lib/api';
 import { isAutoUpdateDisabled, setAutoUpdateDisabled } from '../components/Desktop/UpdateChecker';
+import {
+  getLaunchAtLoginEnabled,
+  setLaunchAtLoginEnabled,
+  setStartupAssistantEnabled,
+  startupAssistantEnabled,
+} from '../lib/startup';
 
 function OllamaModelList() {
   const [models, setModels] = useState<Array<{ name: string; size: number }>>([]);
@@ -49,6 +55,9 @@ function ApiKeyInput({ storageKey, placeholder }: { storageKey: string; placehol
     try { return localStorage.getItem(storageKey) || ''; } catch { return ''; }
   });
   const [saved, setSaved] = useState(false);
+  const [startupAssistantOn, setStartupAssistantOn] = useState(startupAssistantEnabled());
+  const [launchAtLoginOn, setLaunchAtLoginOn] = useState(false);
+  const [launchAtLoginBusy, setLaunchAtLoginBusy] = useState(false);
   const save = (v: string) => {
     setValue(v);
     try { if (v) localStorage.setItem(storageKey, v); else localStorage.removeItem(storageKey); } catch {}
@@ -123,9 +132,13 @@ export function SettingsPage() {
   const [healthy, setHealthy] = useState<boolean | null>(null);
   const [speechBackendAvailable, setSpeechBackendAvailable] = useState<boolean | null>(null);
   const [saved, setSaved] = useState(false);
+  const [startupAssistantOn, setStartupAssistantOn] = useState(startupAssistantEnabled());
+  const [launchAtLoginOn, setLaunchAtLoginOn] = useState(false);
+  const [launchAtLoginBusy, setLaunchAtLoginBusy] = useState(false);
 
   const [autoUpdateEnabled, setAutoUpdateEnabled] = useState(() => !isAutoUpdateDisabled());
   const [updateCheckState, setUpdateCheckState] = useState<'idle' | 'checking' | 'available' | 'latest'>('idle');
+  const [voices, setVoices] = useState<SpeechSynthesisVoice[]>([]);
 
   const handleAutoUpdateToggle = useCallback((enabled: boolean) => {
     setAutoUpdateEnabled(enabled);
@@ -199,6 +212,28 @@ export function SettingsPage() {
     getMemoryStats()
       .then(setMemoryStats)
       .catch(() => setMemoryStats(null));
+  }, []);
+
+  useEffect(() => {
+    if (!isTauri()) return;
+    getLaunchAtLoginEnabled().then((enabled) => {
+      if (enabled != null) setLaunchAtLoginOn(enabled);
+    }).catch(() => {});
+  }, []);
+
+  useEffect(() => {
+    if (!('speechSynthesis' in window)) return;
+
+    const loadVoices = () => {
+      setVoices(window.speechSynthesis.getVoices());
+    };
+
+    loadVoices();
+    window.speechSynthesis.addEventListener('voiceschanged', loadVoices);
+
+    return () => {
+      window.speechSynthesis.removeEventListener('voiceschanged', loadVoices);
+    };
   }, []);
 
   const showSaved = () => {
@@ -604,6 +639,35 @@ export function SettingsPage() {
                 />
               </button>
             </SettingRow>
+            <SettingRow label="Voice" description="Select the exact voice used for wake prompts and read-aloud replies">
+              <div className="flex items-center gap-2">
+                <select
+                  value={settings.speechVoiceName}
+                  onChange={(e) => { updateSettings({ speechVoiceName: e.target.value }); showSaved(); }}
+                  className="max-w-[220px] px-2 py-1.5 rounded-md text-xs"
+                  style={{ background: 'var(--color-bg)', border: '1px solid var(--color-border)', color: 'var(--color-text)' }}
+                >
+                  <option value="">Auto (männlich bevorzugt)</option>
+                  {voices.map((voice) => (
+                    <option key={`${voice.name}-${voice.lang}`} value={voice.name}>
+                      {voice.name} ({voice.lang})
+                    </option>
+                  ))}
+                </select>
+                <button
+                  type="button"
+                  onClick={() => {
+                    if ('speechSynthesis' in window) {
+                      setVoices(window.speechSynthesis.getVoices());
+                    }
+                  }}
+                  className="px-2 py-1.5 rounded-md text-xs"
+                  style={{ background: 'var(--color-bg-secondary)', color: 'var(--color-text-secondary)', border: '1px solid var(--color-border)' }}
+                >
+                  Refresh
+                </button>
+              </div>
+            </SettingRow>
             <SettingRow label="Backend status" description="Requires Whisper, Deepgram, or another speech backend">
               <div className="flex items-center gap-2">
                 <span
@@ -621,11 +685,108 @@ export function SettingsPage() {
                 </span>
               </div>
             </SettingRow>
+            <SettingRow label="Voice dialog" description="Wake on 'Jarvis' and continue speaking without clicking">
+              <button
+                onClick={() => { updateSettings({ voiceDialogEnabled: !settings.voiceDialogEnabled }); showSaved(); }}
+                className="relative w-11 h-6 rounded-full transition-colors cursor-pointer"
+                style={{
+                  background: settings.voiceDialogEnabled ? 'var(--color-accent)' : 'var(--color-bg-tertiary)',
+                }}
+              >
+                <span
+                  className="absolute top-0.5 left-0.5 w-5 h-5 rounded-full transition-transform bg-white"
+                  style={{
+                    transform: settings.voiceDialogEnabled ? 'translateX(20px)' : 'translateX(0)',
+                    boxShadow: '0 1px 3px rgba(0,0,0,0.2)',
+                  }}
+                />
+              </button>
+            </SettingRow>
+            <SettingRow label="Read responses aloud" description="Speak assistant replies after they finish generating">
+              <button
+                onClick={() => { updateSettings({ voiceReadAloudEnabled: !settings.voiceReadAloudEnabled }); showSaved(); }}
+                className="relative w-11 h-6 rounded-full transition-colors cursor-pointer"
+                style={{
+                  background: settings.voiceReadAloudEnabled ? 'var(--color-accent)' : 'var(--color-bg-tertiary)',
+                }}
+              >
+                <span
+                  className="absolute top-0.5 left-0.5 w-5 h-5 rounded-full transition-transform bg-white"
+                  style={{
+                    transform: settings.voiceReadAloudEnabled ? 'translateX(20px)' : 'translateX(0)',
+                    boxShadow: '0 1px 3px rgba(0,0,0,0.2)',
+                  }}
+                />
+              </button>
+            </SettingRow>
             {!speechBackendAvailable && speechBackendAvailable !== null && (
               <div className="text-xs mt-2 px-1" style={{ color: 'var(--color-text-tertiary)' }}>
                 Set up a speech backend to use voice input.
                 See the <a href="https://open-jarvis.github.io/OpenJarvis/user-guide/tools/" target="_blank" rel="noopener noreferrer" style={{ color: 'var(--color-accent)' }}>documentation</a> for details.
               </div>
+            )}
+          </Section>
+
+          {/* Startup */}
+          <Section title="Startup">
+            <SettingRow
+              label="Startup assistant"
+              description="Begruesst dich beim App-Start und fragt nach E-Mails, Nachrichten oder Kalender"
+            >
+              <button
+                onClick={() => {
+                  const next = !startupAssistantOn;
+                  setStartupAssistantOn(next);
+                  setStartupAssistantEnabled(next);
+                  showSaved();
+                }}
+                className="relative w-11 h-6 rounded-full transition-colors cursor-pointer"
+                style={{
+                  background: startupAssistantOn ? 'var(--color-accent)' : 'var(--color-bg-tertiary)',
+                }}
+              >
+                <span
+                  className="absolute top-0.5 left-0.5 w-5 h-5 rounded-full transition-transform bg-white"
+                  style={{
+                    transform: startupAssistantOn ? 'translateX(20px)' : 'translateX(0)',
+                    boxShadow: '0 1px 3px rgba(0,0,0,0.2)',
+                  }}
+                />
+              </button>
+            </SettingRow>
+
+            {isTauri() && (
+              <SettingRow
+                label="Launch at Windows login"
+                description="Startet OpenJarvis automatisch nach der Anmeldung"
+              >
+                <button
+                  onClick={async () => {
+                    if (launchAtLoginBusy) return;
+                    const next = !launchAtLoginOn;
+                    setLaunchAtLoginBusy(true);
+                    const ok = await setLaunchAtLoginEnabled(next);
+                    if (ok) {
+                      setLaunchAtLoginOn(next);
+                      showSaved();
+                    }
+                    setLaunchAtLoginBusy(false);
+                  }}
+                  disabled={launchAtLoginBusy}
+                  className="relative w-11 h-6 rounded-full transition-colors cursor-pointer disabled:opacity-50"
+                  style={{
+                    background: launchAtLoginOn ? 'var(--color-accent)' : 'var(--color-bg-tertiary)',
+                  }}
+                >
+                  <span
+                    className="absolute top-0.5 left-0.5 w-5 h-5 rounded-full transition-transform bg-white"
+                    style={{
+                      transform: launchAtLoginOn ? 'translateX(20px)' : 'translateX(0)',
+                      boxShadow: '0 1px 3px rgba(0,0,0,0.2)',
+                    }}
+                  />
+                </button>
+              </SettingRow>
             )}
           </Section>
 

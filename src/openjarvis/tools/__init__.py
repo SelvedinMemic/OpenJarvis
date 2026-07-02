@@ -28,6 +28,11 @@ except ImportError:
     pass
 
 try:
+    import openjarvis.tools.email_summary  # noqa: F401
+except ImportError:
+    pass
+
+try:
     import openjarvis.tools.file_read  # noqa: F401
 except ImportError:
     pass
@@ -75,6 +80,16 @@ except ImportError:
 try:
     import openjarvis.tools.docker_shell_exec  # noqa: F401
     import openjarvis.tools.shell_exec  # noqa: F401
+except ImportError:
+    pass
+
+try:
+    import openjarvis.tools.app_launch  # noqa: F401
+except ImportError:
+    pass
+
+try:
+    import openjarvis.tools.system_info  # noqa: F401
 except ImportError:
     pass
 

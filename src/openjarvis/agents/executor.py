@@ -77,6 +77,11 @@ class AgentExecutor:
                 tool._engine = self._system.engine
             if hasattr(tool, "_model"):
                 tool._model = self._system.model
+        elif name == "email_summary":
+            if hasattr(tool, "_engine"):
+                tool._engine = self._system.engine
+            if hasattr(tool, "_model"):
+                tool._model = self._system.model
         elif name == "retrieval" or name.startswith("memory_"):
             if hasattr(tool, "_backend"):
                 tool._backend = getattr(self._system, "memory_backend", None)

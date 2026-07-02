@@ -24,7 +24,7 @@ export interface InferenceEndEvent {
 
 export interface ToolCallStartEvent {
   tool: string;
-  arguments: string;
+  arguments: string | Record<string, unknown>;
 }
 
 export interface ToolCallEndEvent {

@@ -307,6 +307,8 @@ def _build_tools(
             tools.append(tool_cls(channel=channel))
         elif name == "llm":
             tools.append(tool_cls(engine=engine, model=model_name))
+        elif name == "email_summary":
+            tools.append(tool_cls(engine=engine, model=model_name))
         elif name == "file_read":
             tools.append(tool_cls())
         else:

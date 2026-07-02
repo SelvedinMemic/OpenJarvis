@@ -5,6 +5,7 @@ import { ErrorBoundary } from './components/ErrorBoundary';
 import App from './App';
 import { initApiBase } from './lib/api';
 import { initAnalytics } from './lib/analytics';
+import { ensureAutostartPreferenceApplied } from './lib/startup';
 import './index.css';
 
 function applyTheme() {
@@ -28,6 +29,9 @@ applyTheme();
 // This ensures JARVIS_PORT is defined in one place (the Rust backend).
 // In non-Tauri environments this is a no-op.
 initApiBase().finally(() => {
+  // Keep desktop launch-at-login preference in sync with the OS.
+  void ensureAutostartPreferenceApplied();
+
   // Kick off analytics init in the background — it's never awaited so
   // a slow/failed identity fetch never delays UI render.
   void initAnalytics();

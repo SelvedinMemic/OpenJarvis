@@ -3,7 +3,12 @@
 from __future__ import annotations
 
 import logging
+import os
+import shutil
+import subprocess
 import sys
+import time
+from urllib.parse import urlparse
 
 import click
 from rich.console import Console
@@ -23,6 +28,96 @@ from openjarvis.intelligence import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _effective_ollama_host(config: object) -> str:
+    """Resolve Ollama host using the same precedence as OllamaEngine."""
+    configured = getattr(getattr(config, "engine", object()), "ollama_host", "")
+    if isinstance(configured, str) and configured.strip():
+        host = configured.strip()
+    else:
+        env_host = os.environ.get("OLLAMA_HOST", "").strip()
+        host = env_host or "http://localhost:11434"
+    if "://" not in host:
+        host = f"http://{host}"
+    return host.rstrip("/")
+
+
+def _is_loopback_host(host: str) -> bool:
+    """Return True when the host points to the local machine."""
+    parsed = urlparse(host)
+    hostname = (parsed.hostname or "").lower()
+    return hostname in {"localhost", "127.0.0.1", "::1"}
+
+
+def _ollama_reachable(host: str) -> bool:
+    try:
+        import httpx
+
+        resp = httpx.get(f"{host}/api/tags", timeout=2.0)
+        return resp.is_success
+    except Exception:
+        return False
+
+
+def _start_ollama_process(host: str) -> bool:
+    """Best-effort spawn of ``ollama serve`` in the background."""
+    if not shutil.which("ollama"):
+        return False
+
+    env = os.environ.copy()
+    parsed = urlparse(host)
+    hostname = parsed.hostname or "127.0.0.1"
+    port = parsed.port or 11434
+    env["OLLAMA_HOST"] = f"{hostname}:{port}"
+
+    kwargs: dict[str, object] = {
+        "stdin": subprocess.DEVNULL,
+        "stdout": subprocess.DEVNULL,
+        "stderr": subprocess.DEVNULL,
+        "env": env,
+    }
+    if sys.platform == "win32":
+        kwargs["creationflags"] = (
+            subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP
+        )
+
+    try:
+        subprocess.Popen(["ollama", "serve"], **kwargs)  # noqa: S603
+        return True
+    except (OSError, ValueError):
+        return False
+
+
+def _maybe_autostart_local_ollama(
+    *,
+    config: object,
+    engine_key: str | None,
+    console: Console,
+) -> bool:
+    """Start local Ollama when selected and currently unreachable."""
+    wanted = (engine_key or getattr(getattr(config, "engine", object()), "default", "")).strip()  # type: ignore[union-attr]
+    if wanted != "ollama":
+        return False
+
+    host = _effective_ollama_host(config)
+    if not _is_loopback_host(host):
+        return False
+    if _ollama_reachable(host):
+        return False
+
+    if not _start_ollama_process(host):
+        return False
+
+    console.print(
+        "[yellow]No running Ollama detected. Starting local `ollama serve`...[/yellow]"
+    )
+    for _ in range(30):
+        if _ollama_reachable(host):
+            console.print("[green]Ollama is now running.[/green]")
+            return True
+        time.sleep(0.5)
+    return False
 
 
 def _unique_model_ids(model_ids: list[str]) -> list[str]:
@@ -155,6 +250,14 @@ def serve(
     )
     resolved = get_engine(config, engine_key, model=selection_model)
     if resolved is None:
+        autostarted = _maybe_autostart_local_ollama(
+            config=config,
+            engine_key=engine_key,
+            console=console,
+        )
+        if autostarted:
+            resolved = get_engine(config, engine_key, model=selection_model)
+    if resolved is None:
         console.print(
             "[red bold]No inference engine available.[/red bold]\n\n"
             "Make sure an engine is running."
@@ -267,7 +370,9 @@ def serve(
 
     # Resolve agent
     agent = None
-    agent_key = agent_name or config.server.agent
+    # Prefer explicit CLI override, then legacy [server].agent, then the
+    # canonical [agent].default_agent used by ask/chat/system paths.
+    agent_key = agent_name or config.server.agent or config.agent.default_agent
     # Tool instances resolved for the primary agent are reused below to build
     # the scheduler's ToolExecutor — avoiding a second full SystemBuilder.build()
     # (which would re-discover the engine, re-resolve tools, re-open the channel,

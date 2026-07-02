@@ -474,6 +474,11 @@ class SystemBuilder:
                 tool._engine = engine
             if hasattr(tool, "_model"):
                 tool._model = model
+        elif name == "email_summary":
+            if hasattr(tool, "_engine"):
+                tool._engine = engine
+            if hasattr(tool, "_model"):
+                tool._model = model
         elif name == "retrieval":
             if hasattr(tool, "_backend"):
                 tool._backend = memory_backend

@@ -307,6 +307,10 @@ class QueryOrchestrator:
                     from openjarvis.tools.llm_tool import LLMTool
 
                     tools.append(LLMTool(s.engine, model=s.model))
+                elif name == "email_summary":
+                    from openjarvis.tools.email_summary import EmailSummaryTool
+
+                    tools.append(EmailSummaryTool(s.engine, model=s.model))
                 elif ToolRegistry.contains(name):
                     tools.append(ToolRegistry.create(name))
             except Exception as exc:
