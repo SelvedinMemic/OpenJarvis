@@ -19,9 +19,6 @@ import {
   RefreshCw,
 } from 'lucide-react';
 import { useAppStore, type ThemeMode } from '../lib/store';
-<<<<<<< HEAD
-import { checkHealth, fetchSpeechHealth, getMemoryStats, getInferenceSource, isTauri, setInferenceSource, type InferenceSource } from '../lib/api';
-=======
 import {
   checkHealth,
   fetchSpeechHealth,
@@ -33,7 +30,6 @@ import {
   isTauri,
   type InferenceSource,
 } from '../lib/api';
->>>>>>> 2c2a4b6ae41cfe803130548439df6efe592baf06
 import { isAutoUpdateDisabled, setAutoUpdateDisabled } from '../components/Desktop/UpdateChecker';
 import {
   getLaunchAtLoginEnabled,
@@ -69,16 +65,6 @@ function OllamaModelList() {
 function ApiKeyInput({ keyName, placeholder }: { keyName: string; placeholder: string }) {
   const [value, setValue] = useState('');
   const [saved, setSaved] = useState(false);
-<<<<<<< HEAD
-  const [startupAssistantOn, setStartupAssistantOn] = useState(startupAssistantEnabled());
-  const [launchAtLoginOn, setLaunchAtLoginOn] = useState(false);
-  const [launchAtLoginBusy, setLaunchAtLoginBusy] = useState(false);
-  const save = (v: string) => {
-    setValue(v);
-    try { if (v) localStorage.setItem(storageKey, v); else localStorage.removeItem(storageKey); } catch {}
-    setSaved(true);
-    setTimeout(() => setSaved(false), 2000);
-=======
   const [hasKey, setHasKey] = useState(false);
   const [error, setError] = useState('');
   const desktopKeyStorage = isTauri();
@@ -116,7 +102,6 @@ function ApiKeyInput({ keyName, placeholder }: { keyName: string; placeholder: s
     } catch (e: any) {
       setError(e?.message || 'Failed to save API key');
     }
->>>>>>> 2c2a4b6ae41cfe803130548439df6efe592baf06
   };
 
   const remove = async () => {

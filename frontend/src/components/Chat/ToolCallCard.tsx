@@ -13,9 +13,20 @@ const statusConfig = {
 };
 
 function previewArgs(raw: string): string {
-  if (!raw) return '';
+  if (raw == null) return '';
+  const normalized =
+    typeof raw === 'string'
+      ? raw
+      : (() => {
+          try {
+            return JSON.stringify(raw);
+          } catch {
+            return String(raw);
+          }
+        })();
+  if (!normalized) return '';
   try {
-    const parsed = JSON.parse(raw);
+    const parsed = JSON.parse(normalized);
     if (parsed && typeof parsed === 'object') {
       const entries = Object.entries(parsed);
       if (entries.length === 0) return '';
@@ -28,7 +39,7 @@ function previewArgs(raw: string): string {
   } catch {
     /* fall through */
   }
-  return raw.length > 60 ? `${raw.slice(0, 60)}…` : raw;
+  return normalized.length > 60 ? `${normalized.slice(0, 60)}…` : normalized;
 }
 
 export function ToolCallCard({ toolCall }: Props) {
@@ -159,7 +170,15 @@ export function ToolCallCard({ toolCall }: Props) {
   );
 }
 
-function formatJson(raw: string): string {
+function formatJson(raw: unknown): string {
+  if (raw == null) return '';
+  if (typeof raw !== 'string') {
+    try {
+      return JSON.stringify(raw, null, 2);
+    } catch {
+      return String(raw);
+    }
+  }
   try {
     return JSON.stringify(JSON.parse(raw), null, 2);
   } catch {

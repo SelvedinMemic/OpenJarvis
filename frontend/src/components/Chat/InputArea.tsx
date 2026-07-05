@@ -171,6 +171,16 @@ export function InputArea() {
     resetStream();
   }, [resetStream]);
 
+  const normalizeToolResult = useCallback((value: unknown): string => {
+    if (value == null) return '';
+    if (typeof value === 'string') return value;
+    try {
+      return JSON.stringify(value, null, 2);
+    } catch {
+      return String(value);
+    }
+  }, []);
+
   const sendMessage = useCallback(async (rawInput?: string) => {
     const content = normalizeStartupCommand((rawInput ?? input).trim());
     if (!content || streamState.isStreaming) return;
@@ -423,7 +433,7 @@ export function InputArea() {
             if (tc) {
               tc.status = data.success ? 'success' : 'error';
               tc.latency = data.latency;
-              tc.result = data.result;
+              tc.result = normalizeToolResult(data.result);
             }
             setStreamState({
               phase: 'Generating...',
@@ -560,6 +570,7 @@ export function InputArea() {
     deepResearch,
     temperature,
     maxTokens,
+    normalizeToolResult,
   ]);
 
   useEffect(() => {
