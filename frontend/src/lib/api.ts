@@ -104,6 +104,29 @@ export const authHeaders = (
   return key ? { ...extra, Authorization: `Bearer ${key}` } : { ...extra };
 };
 
+export interface SharedConversationStore {
+  version: 1;
+  conversations: Record<string, unknown>;
+  activeId: string | null;
+}
+
+export async function fetchSharedConversations(): Promise<SharedConversationStore> {
+  const res = await apiFetch('/v1/ui/conversations');
+  if (!res.ok) throw new Error(`Failed: ${res.status}`);
+  return res.json();
+}
+
+export async function saveSharedConversations(
+  store: SharedConversationStore,
+): Promise<void> {
+  const res = await apiFetch('/v1/ui/conversations', {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(store),
+  });
+  if (!res.ok) throw new Error(`Failed: ${res.status}`);
+}
+
 // Centralized fetch for the local server: prepends getBase() and injects the
 // Bearer auth header (when a key is set) on every call. Using this everywhere
 // guarantees no /v1 or /api request is sent without auth — the bug in #266 was

@@ -58,12 +58,22 @@ export default function App() {
 
   // Sync overlay conversations into the main app
   const importOverlay = useAppStore((s) => s.importOverlayConversation);
+  const syncConversationsFromServer = useAppStore((s) => s.syncConversationsFromServer);
   useEffect(() => {
     if (!isTauri()) return;
     importOverlay();
     const interval = setInterval(importOverlay, 5000);
     return () => clearInterval(interval);
   }, [importOverlay]);
+
+  // Keep browser and desktop chat history on a shared backend store.
+  useEffect(() => {
+    void syncConversationsFromServer();
+    const interval = setInterval(() => {
+      void syncConversationsFromServer();
+    }, 15000);
+    return () => clearInterval(interval);
+  }, [syncConversationsFromServer]);
 
   // Fetch models on mount
   useEffect(() => {

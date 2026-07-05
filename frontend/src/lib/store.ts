@@ -14,7 +14,11 @@ import type {
   ToolCallInfo,
   TokenUsage,
 } from '../types';
-import type { ManagedAgent } from './api';
+import {
+  fetchSharedConversations,
+  saveSharedConversations,
+  type ManagedAgent,
+} from './api';
 
 export interface CachedConnector {
   connector_id: string;
@@ -45,6 +49,126 @@ interface ConversationStore {
   activeId: string | null;
 }
 
+function toDisplayString(value: unknown): string {
+  if (value == null) return '';
+  if (typeof value === 'string') return value;
+  try {
+    return JSON.stringify(value);
+  } catch {
+    return String(value);
+  }
+}
+
+function normalizeConversationStore(raw: any): {
+  store: ConversationStore;
+  changed: boolean;
+} {
+  if (!raw || raw.version !== 1 || typeof raw.conversations !== 'object') {
+    return {
+      store: { version: 1, conversations: {}, activeId: null },
+      changed: false,
+    };
+  }
+
+  let changed = false;
+  const normalized: Record<string, Conversation> = {};
+
+  for (const [id, conv] of Object.entries(raw.conversations as Record<string, any>)) {
+    if (!conv || typeof conv !== 'object') {
+      changed = true;
+      continue;
+    }
+
+    const messages = Array.isArray(conv.messages) ? conv.messages : [];
+    const normMessages = messages.map((m: any) => {
+      const next = { ...m };
+
+      if (typeof next.content !== 'string') {
+        next.content = toDisplayString(next.content);
+        changed = true;
+      }
+
+      if (Array.isArray(next.toolCalls)) {
+        next.toolCalls = next.toolCalls.map((tc: any) => {
+          const n = { ...tc };
+
+          const normalizedTool =
+            typeof n.tool === 'string'
+              ? n.tool
+              : typeof n.target === 'string'
+                ? n.target
+                : toDisplayString(n.tool || n.target || 'tool');
+          if (n.tool !== normalizedTool) {
+            n.tool = normalizedTool;
+            changed = true;
+          }
+
+          const normalizedArgs =
+            typeof n.arguments === 'string'
+              ? n.arguments
+              : toDisplayString(n.arguments ?? {});
+          if (n.arguments !== normalizedArgs) {
+            n.arguments = normalizedArgs;
+            changed = true;
+          }
+
+          const normalizedStatus =
+            n.status === 'running' || n.status === 'success' || n.status === 'error'
+              ? n.status
+              : 'success';
+          if (n.status !== normalizedStatus) {
+            n.status = normalizedStatus;
+            changed = true;
+          }
+
+          if (!n.id || typeof n.id !== 'string') {
+            n.id = generateId();
+            changed = true;
+          }
+
+          if (n.result != null && typeof n.result !== 'string') {
+            n.result = toDisplayString(n.result);
+            changed = true;
+          }
+
+          if (n.latency != null && typeof n.latency !== 'number') {
+            const parsed = Number(n.latency);
+            n.latency = Number.isFinite(parsed) ? parsed : undefined;
+            changed = true;
+          }
+
+          return n;
+        });
+      }
+
+      return next;
+    });
+
+    normalized[id] = {
+      id: conv.id || id,
+      title: typeof conv.title === 'string' ? conv.title : 'New chat',
+      createdAt: Number(conv.createdAt) || Date.now(),
+      updatedAt: Number(conv.updatedAt) || Date.now(),
+      model: typeof conv.model === 'string' ? conv.model : 'default',
+      messages: normMessages,
+    };
+  }
+
+  const activeId =
+    typeof raw.activeId === 'string' && normalized[raw.activeId]
+      ? raw.activeId
+      : null;
+
+  return {
+    store: {
+      version: 1,
+      conversations: normalized,
+      activeId,
+    },
+    changed,
+  };
+}
+
 function generateId(): string {
   return Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
 }
@@ -54,8 +178,9 @@ function loadConversations(): ConversationStore {
     const raw = localStorage.getItem(CONVERSATIONS_KEY);
     if (!raw) return { version: 1, conversations: {}, activeId: null };
     const parsed = JSON.parse(raw);
-    if (parsed.version === 1) return parsed;
-    return { version: 1, conversations: {}, activeId: null };
+    const { store, changed } = normalizeConversationStore(parsed);
+    if (changed) saveConversations(store);
+    return store;
   } catch {
     return { version: 1, conversations: {}, activeId: null };
   }
@@ -63,6 +188,9 @@ function loadConversations(): ConversationStore {
 
 function saveConversations(store: ConversationStore): void {
   localStorage.setItem(CONVERSATIONS_KEY, JSON.stringify(store));
+  void saveSharedConversations(store).catch(() => {
+    // Offline/local mode fallback: keep local save even when server sync fails.
+  });
 }
 
 export type ThemeMode = 'light' | 'dark' | 'system';
@@ -159,6 +287,7 @@ interface AppState {
 
   // Actions: conversations
   loadConversations: () => void;
+  syncConversationsFromServer: () => Promise<void>;
   importOverlayConversation: () => Promise<void>;
   createConversation: (model?: string) => string;
   selectConversation: (id: string) => void;
@@ -284,6 +413,45 @@ export const useAppStore = create<AppState>((set, get) => {
         ),
         activeId: store.activeId,
       });
+    },
+
+    syncConversationsFromServer: async () => {
+      try {
+        const remote = await fetchSharedConversations();
+        const local = loadConversations();
+        const normalizedRemote = normalizeConversationStore(remote).store;
+
+        const merged: ConversationStore = {
+          version: 1,
+          conversations: { ...local.conversations },
+          activeId: local.activeId,
+        };
+
+        for (const [id, remoteConv] of Object.entries(normalizedRemote.conversations)) {
+          const localConv = merged.conversations[id];
+          if (!localConv || (remoteConv.updatedAt || 0) >= (localConv.updatedAt || 0)) {
+            merged.conversations[id] = remoteConv;
+          }
+        }
+
+        if (normalizedRemote.activeId && merged.conversations[normalizedRemote.activeId]) {
+          merged.activeId = normalizedRemote.activeId;
+        }
+
+        saveConversations(merged);
+        const activeConv = merged.activeId
+          ? merged.conversations[merged.activeId]
+          : null;
+        set({
+          conversations: Object.values(merged.conversations).sort(
+            (a, b) => b.updatedAt - a.updatedAt,
+          ),
+          activeId: merged.activeId,
+          messages: activeConv ? activeConv.messages : [],
+        });
+      } catch {
+        // If backend is unreachable we keep the existing local state.
+      }
     },
 
     importOverlayConversation: async () => {

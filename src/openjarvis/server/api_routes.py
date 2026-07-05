@@ -6,10 +6,11 @@ import asyncio
 import inspect
 import json
 import logging
+from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, HTTPException, Request, WebSocket, WebSocketDisconnect
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 logger = logging.getLogger(__name__)
 
@@ -56,6 +57,12 @@ class OptimizeRunRequest(BaseModel):
     max_trials: int = 20
     optimizer_model: str = "claude-sonnet-4-6"
     max_samples: int = 50
+
+
+class UIConversationsRequest(BaseModel):
+    version: int = 1
+    conversations: Dict[str, Any] = Field(default_factory=dict)
+    activeId: Optional[str] = None
 
 
 # ---- Agent routes ----
@@ -983,6 +990,59 @@ async def feedback_stats(request: Request):
 
 optimize_router = APIRouter(prefix="/v1/optimize", tags=["optimize"])
 
+# ---- Shared UI state routes ----
+
+ui_state_router = APIRouter(prefix="/v1/ui", tags=["ui-state"])
+
+
+def _ui_conversations_path() -> Path:
+    from openjarvis.core.paths import get_config_dir
+
+    return get_config_dir() / "ui_conversations.json"
+
+
+def _default_ui_store() -> Dict[str, Any]:
+    return {"version": 1, "conversations": {}, "activeId": None}
+
+
+@ui_state_router.get("/conversations")
+async def get_ui_conversations(request: Request):
+    path = _ui_conversations_path()
+    if not path.exists():
+        return _default_ui_store()
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return _default_ui_store()
+
+    if not isinstance(payload, dict):
+        return _default_ui_store()
+    if payload.get("version") != 1:
+        return _default_ui_store()
+    if not isinstance(payload.get("conversations"), dict):
+        return _default_ui_store()
+    if payload.get("activeId") is not None and not isinstance(
+        payload.get("activeId"), str
+    ):
+        payload["activeId"] = None
+
+    return payload
+
+
+@ui_state_router.put("/conversations")
+async def put_ui_conversations(req: UIConversationsRequest, request: Request):
+    payload = {
+        "version": 1,
+        "conversations": req.conversations,
+        "activeId": req.activeId,
+    }
+    path = _ui_conversations_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = path.with_suffix(path.suffix + ".tmp")
+    tmp_path.write_text(json.dumps(payload), encoding="utf-8")
+    tmp_path.replace(path)
+    return {"status": "ok"}
+
 
 @optimize_router.get("/runs")
 async def list_optimize_runs(request: Request):
@@ -1060,6 +1120,7 @@ def include_all_routes(app) -> None:
     app.include_router(speech_router)
     app.include_router(feedback_router)
     app.include_router(optimize_router)
+    app.include_router(ui_state_router)
 
     # Agent Manager routes (if available)
     try:
@@ -1109,4 +1170,5 @@ __all__ = [
     "speech_router",
     "feedback_router",
     "optimize_router",
+    "ui_state_router",
 ]
